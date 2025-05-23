@@ -43,7 +43,7 @@
 
     - name: Clone app repository
       git:
-        repo: 'https://github.com/Maddie2030/assignment_project_2.git'
+        repo: 'https://github.com/srikanthb1797/assignment_project.git'
         dest: /home/ubuntu/app
         version: main
         force: yes
