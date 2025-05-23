@@ -1,0 +1,83 @@
+name: project-assignment
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    env:
+      ANSIBLE_HOST_KEY_CHECKING: "False"
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Set up SSH keys
+      run: |
+        echo "${{ secrets.BASTION_HOST_SSH_PRIVATE_KEY }}" > bastion_key.pem
+        echo "${{ secrets.TS_SSH_PRIVATE_KEY }}" > ts_key.pem
+        chmod 600 bastion_key.pem
+        chmod 600 ts_key.pem
+
+    - name: Prepare SSH Known Hosts
+      run: |
+        mkdir -p ~/.ssh
+        ssh-keyscan -H ${{ secrets.BASTION_HOST_IP }} >> ~/.ssh/known_hosts
+        # No need to directly keyscan TS_HOST_IP from the runner if going through bastion
+        # However, if your Ansible playbook directly connects from the runner to TS_HOST after setting up a tunnel or similar,
+        # you might still need it. For a standard ProxyJump, this is not strictly necessary here.
+        # Consider if your playbook 'vault-bind.yml' targets TS_HOST directly from the runner or from the bastion.
+        # If the playbook runs on the bastion and it connects to TS_HOST, then the bastion needs to know TS_HOST.
+        # If Ansible on the runner connects *through* the bastion to TS_HOST, this setup is more relevant.
+        chmod 644 ~/.ssh/known_hosts
+      env:
+        ANSIBLE_HOST_KEY_CHECKING: "False" # This is already globally set, but doesn't hurt
+
+    - name: Run Ansible Playbook
+      uses: dawidd6/action-ansible-playbook@v2
+      with:
+        playbook: vault-bind.yml
+        inventory: |
+          [bastion]
+          bastion_server ansible_host=${{ secrets.BASTION_HOST_IP }} ansible_user=ubuntu ansible_ssh_private_key_file=bastion_key.pem
+
+          [ts_server]
+          target_server ansible_host=${{ secrets.TS_HOST_IP }} ansible_user=ubuntu ansible_ssh_private_key_file=ts_key.pem ansible_ssh_common_args='-o ProxyCommand="ssh -W %h:%p -q ubuntu@${{ secrets.BASTION_HOST_IP }} -i bastion_key.pem"'
+
+          # If your playbook vault-bind.yml is intended to run ON the TS_HOST,
+          # then your 'all' group or the group targeted by the playbook should be ts_server.
+          # For example, if vault-bind.yml targets hosts in a group called 'app_servers',
+          # you would define [app_servers] and put target_server in it.
+          # Or, if it's meant to run directly on 'ts_server':
+          [all:vars]
+          # Common variables can go here
+
+          # Example: If vault-bind.yml should run on target_server
+          # You might need to adjust which group the playbook targets.
+          # If the playbook is simple and just runs on the specified 'hosts:',
+          # ensure that 'hosts:' in your vault-bind.yml is set to 'ts_server' or 'all' (if all only contains ts_server for this operation).
+        # Ensure your vault-bind.yml playbook targets the 'ts_server' group or 'target_server' host.
+        # For example, the top of your vault-bind.yml might look like:
+        # ---
+        # - hosts: ts_server
+        #   become: yes # or whatever is needed
+        #   tasks:
+        #     - name: Your task on the TS_HOST
+        #       # ...
+        #
+        # OR if you want to pass the target host directly:
+        # hosts: target_server
+
+        # The 'key_file' parameter for dawidd6/action-ansible-playbook@v2 is another way to specify the private key
+        # if you don't want to put it directly in the inventory, but since you have two different keys,
+        # specifying them in the inventory with ansible_ssh_private_key_file is clearer.
+
+    # Optional: If you need to ensure the ts_key.pem is available on the bastion to then SSH from bastion to TS_HOST
+    # (This is NOT needed if using ProxyCommand as shown above, because the second SSH connection originates from the runner *through* the bastion)
+    # If your vault-bind.yml is run *on* the bastion and *it* is responsible for SSHing to TS_HOST,
+    # then you would need a different setup, likely involving copying ts_key.pem to the bastion first.
+    # The ProxyCommand method is generally cleaner for GitHub Actions.
